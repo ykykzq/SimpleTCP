@@ -1,22 +1,60 @@
 mod data_link_layer;
 mod network_layer;
-use std::sync::{Arc,Mutex};
-use lazy_static::*;
+mod tools;
+
+use std::sync::Arc;
 use std::thread;
-use crate::tools::send_queue::SendQueue;
-pub mod tools;
 
 
-lazy_static!{
-    ///懒分配的静态变量--发送队列
-    static ref SEND_QUEUE:Arc<Mutex<SendQueue>> = Arc::new(Mutex::new(SendQueue::new()));
-}
+use network_layer::arp::send::{ARP_SEND_REPLY_QUEUE, ARP_SEND_REQUEST_QUEUE};
+
+use crate::data_link_layer::ethernet_v2::send::ETHERNET_V2_SEND_QUEUE;
+
+use crate::network_layer::arp::cache_table::ARP_CACHE_TABLE;
+use crate::network_layer::arp::receive::ARP_RECEIVE_QUEUE;
+
+
+
 fn main() {
-    network_layer::ip::send(Arc::clone(&SEND_QUEUE));
-
-    let handle = thread::spawn(move || {
-        data_link_layer::ethernet_v2::send(Arc::clone(&SEND_QUEUE));
+    //运行数据链路层-EthernetV2
+    let eth2_send_handle = thread::spawn(move || {
+        //EthernetV2协议-发送
+        data_link_layer::ethernet_v2::send::send(
+            Arc::clone(&ETHERNET_V2_SEND_QUEUE)
+        );
     });
-    
-    handle.join().unwrap();
+
+    let eth2_receive_handle = thread::spawn(move || {
+        //EthernetV2协议-接收
+        data_link_layer::ethernet_v2::receive::receive(
+            Arc::clone(&ARP_RECEIVE_QUEUE));
+    });
+
+    //运行网络层
+    let ip_send_handle = thread::spawn(move || {
+        //ip协议-发送
+        network_layer::ip::send(
+            Arc::clone(&ARP_CACHE_TABLE),
+            Arc::clone(&ETHERNET_V2_SEND_QUEUE));
+    });
+
+    let arp_send_handle = thread::spawn(move || {
+        //arp协议-发送
+        network_layer::arp::send::send(
+            Arc::clone(&ETHERNET_V2_SEND_QUEUE),
+            Arc::clone(&ARP_SEND_REPLY_QUEUE),
+            Arc::clone(&ARP_SEND_REQUEST_QUEUE));
+    });
+    let arp_receive_handle = thread::spawn(move || {
+        //arp协议-接收
+        network_layer::arp::receive::receive(
+            Arc::clone(&ARP_CACHE_TABLE),
+            Arc::clone(&ARP_RECEIVE_QUEUE));
+    });
+
+    eth2_send_handle.join().unwrap();
+    eth2_receive_handle.join().unwrap();
+    ip_send_handle.join().unwrap();
+    arp_send_handle.join().unwrap();
+    arp_receive_handle.join().unwrap();
 }

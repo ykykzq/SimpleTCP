@@ -1,7 +1,15 @@
-use std::{sync::{Arc,Mutex},  thread::yield_now, io::Write, fs::File};
-use crate::tools::receive_queue::ReceiveQueue;
+use std::sync::{Arc,Mutex};
+use std::thread::yield_now;
+use std::io::Write;
+use std::fs::File;
+use std::collections::VecDeque;
+use lazy_static::*;
 
-#[allow(dead_code)]
+lazy_static!{
+    ///静态变量--IP的接收队列
+    pub static ref IP_RECEIVE_QUEUE:Arc<Mutex<IpReceiveQueue>> = Arc::new(Mutex::new(IpReceiveQueue::new()));
+}
+
 struct IpHeader{
     /// 默认IP版本：IPV4，头部长度：单位为4字节，最长60字节
     version_and_hdrlen:u8,
@@ -47,6 +55,43 @@ impl IpHeader{
         result
     }
 }
+
+///接收队列，下层协议交付时写入此结构
+pub struct IpReceiveQueue(
+    VecDeque<Vec<u8>>
+);
+
+impl IpReceiveQueue{
+    ///生成接收队列
+    pub fn new() -> Self{
+        let new_receive_queue=VecDeque::new();
+        IpReceiveQueue(new_receive_queue)
+    }
+
+    /// ### 功能
+    /// data_link层向其中写入数据。
+    /// 交付的数据应该在一定长度之间，该函数会检查。
+    pub fn add_data(&mut self,buffer: &Vec<u8>) -> bool{
+        if buffer.len()>1500 || buffer.len()<46{
+            return false;
+        }
+        self.0.push_back(buffer.clone());
+        true
+    }
+    /// ### 功能
+    /// 获取第一个数据
+    pub fn get_data(&mut self)-> Option<Vec<u8>>{
+        self.0.pop_front()
+    }
+    
+    /// ### 功能
+    /// 队列是否为空
+    pub fn is_empty(&self)->bool{
+        self.0.is_empty()
+    }
+}
+
+
 /// 一个队列，其中的元素是id对应的各数据报的缓冲区
 /// ### 数据结构
 /// 每一个元素包括四部分：数据报id，数据队列，一个用于指示已经接收多少字节的的指针，一个(分片起始位置，分片长度)队列，数据应有的总长度
@@ -80,7 +125,7 @@ impl ReceiveDataQueue {
         let mut flag=false;
         for i in &element.3{
             //检查是否存在该分片
-            if i.0==offset.into(){
+            if i.0==offset as u32{
                 flag=true;
                 break;
             }
@@ -160,22 +205,24 @@ pub fn find_receive_data_queue_len(vec:&Vec<(u32,u32)>,current_ptr:u32)->Option<
     None
 }
 
-pub fn receive(shared_reveive_queue:Arc<Mutex<ReceiveQueue>>) {
+pub fn receive(shared_ip_receive_queue:Arc<Mutex<IpReceiveQueue>>) {
     let mut receive_data_queue:ReceiveDataQueue=ReceiveDataQueue(Vec::new());
     loop{
         // 队列为空则直接跳过
-        if shared_reveive_queue.lock().unwrap().is_empty(){
+        if shared_ip_receive_queue.lock().unwrap().is_empty(){
             yield_now();
+            //因为下面代码在else块里，所以无需continue;
         }
         else {
         // 对于每一个分组，根据id判断其所属的数据报。
         // 如果为新的，则新建一个缓冲区存放
         // 如果为旧的，跟已有的拼接，如果拼接为完整，则写入。
             // 获取并解析
-            let data_from_data_link_layer=shared_reveive_queue.lock().unwrap().get_data().unwrap();
+            let data_from_data_link_layer=shared_ip_receive_queue.lock().unwrap().get_data().unwrap();
             if data_from_data_link_layer.len()<60{
                 //小于60，肯定不是一个IP数据分组
                 yield_now();
+                continue;
             }
             let hdr=IpHeader::from_u8( & data_from_data_link_layer);
 
@@ -210,7 +257,7 @@ pub fn receive(shared_reveive_queue:Arc<Mutex<ReceiveQueue>>) {
             }
             if complete_flag{//如果接收完该分组后数据报完整，则写入到文件中
                 let id;
-                {//为了通过编译......不得不如此
+                {//大括号是为了通过编译......不得不如此
                     //打开文件
                     let file_path=String::from("receive.data");
                     let mut file=File::create(file_path).unwrap();
@@ -222,7 +269,7 @@ pub fn receive(shared_reveive_queue:Arc<Mutex<ReceiveQueue>>) {
                     id=element.0;
                 }
                 
-                {//不然无法绕开rust的所有权机制的限制
+                {//......不然无法绕开rust的所有权机制的限制
                     //将已经完成的缓冲区从receive_data_queue中删除
                     receive_data_queue.delete_element(id);
                 }

@@ -1,9 +1,10 @@
 use std::fs::File;
 use std::io::Read;
 use std::sync::{Arc,Mutex};
-
-use crate::tools::send_queue::SendQueue;
-
+use std::thread::yield_now;
+use crate::data_link_layer::ethernet_v2::send::Eth2SendQueue;
+use crate::network_layer::arp::cache_table::ArpCacheTable;
+use crate::tools::global_variables::*;
 
 ///最大分片长度
 const DATA_SLICE_LENTH:usize=1400;
@@ -15,6 +16,8 @@ const UDP_PROTOCOL :u8= 17;
 const ICMPV4_PROTOCOL:u8=1;
 /// 上层协议字段-IGMPV4
 const IGMPV4_PROTOCOL:u8=2;
+
+
 
 struct IpHeader{
     /// 默认IP版本：IPV4，头部长度：单位为4字节，最长60字节
@@ -34,9 +37,9 @@ struct IpHeader{
     /// 首部检验和
 	check_sum:u16,
     /// 源IP地址
-	source_ip:u32,   
+	source_ip:[u8;4],   
     /// 目的IP地址
-    destination_ip:u32,
+    destination_ip:[u8;4],
     /// 40字节的可选部分
 	optional:[u8;40],
 }
@@ -52,10 +55,10 @@ impl IpHeader {
         result.push(self.flags_and_fragment_offset);
         result.push((self.time_to_live as u16) << 8 | self.upper_protocol_type as u16);
         result.push(self.check_sum);
-        result.push((self.source_ip>>8)as u16);
-        result.push((self.source_ip & 0x0000_ffff)as u16);
-        result.push((self.destination_ip>>8)as u16);
-        result.push((self.destination_ip & 0x0000_ffff)as u16);
+        result.push((self.source_ip[3] as u16)<<8|(self.source_ip[2] as u16));
+        result.push((self.source_ip[1] as u16)<<8|(self.source_ip[0] as u16));
+        result.push((self.destination_ip[3] as u16)<<8|(self.destination_ip[2] as u16));
+        result.push((self.destination_ip[1] as u16)<<8|(self.destination_ip[0] as u16));
         for i in 0..20{
             result.push((self.optional[2*i] as u16) << 8 | self.optional[2*i+1] as u16);
         }
@@ -73,8 +76,8 @@ impl IpHeader {
         in_flags_and_fragment_offset:u16,
         in_time_to_live:u8,
         in_upper_protocol_type:u8,
-        in_source_ip:u32,   
-        in_destination_ip:u32,
+        in_source_ip:[u8;4],   
+        in_destination_ip:[u8;4],
         in_optional:[u8;40],
     )-> IpHeader{
         let mut hdr=IpHeader{
@@ -148,15 +151,7 @@ fn read_file_and_into_slice(file_path:&String,tmp:&mut Vec<u8>) ->(usize,usize) 
     } 
 }
 
-/// ### 功能
-/// 将四个u8转换为ip地址
-pub fn ip_from_u8(a:u8,b:u8,c:u8,d:u8)->u32{
-    (a as u32) << 24 |
-    (b as u32) << 16 |
-    (c as u32) << 8  |
-    (d as u32)
-    
-}
+
 /// ### 功能
 /// 将Vec<u16>转换为Vec<u8>
 pub fn u8_from_u16 (u16_array:& Vec<u16>)-> Vec<u8>{
@@ -172,7 +167,11 @@ pub fn u8_from_u16 (u16_array:& Vec<u16>)-> Vec<u8>{
 /// 将filepath对应的文件分片，并塞入发送队列里
 /// ### 返回值
 /// 
-pub fn load_ip_data(file_path:&String,send_queue:Arc<Mutex<SendQueue>>) -> bool{
+pub fn load_ip_data(
+    file_path:&String,
+    shared_arp_cache_table:Arc<Mutex<ArpCacheTable>>,
+    shared_ethernet_v2_queue:Arc<Mutex<Eth2SendQueue>>
+) -> bool{
     let mut data:Vec<u8>=Vec::new();
     //分片数
     let (len_of_data,number_of_slice)=read_file_and_into_slice(file_path,&mut data);
@@ -181,24 +180,32 @@ pub fn load_ip_data(file_path:&String,send_queue:Arc<Mutex<SendQueue>>) -> bool{
     if number_of_slice==1{
         let mut buffer:Vec<u8>=Vec::new();
         let hdr:IpHeader=IpHeader::new (
-            0x4f,
+            0x4f,//60
             0xfe,
             60+len_of_data as u16,
             2023,			
             0b0100_0000_0000_0000,//DF=1,offset=0
             64,
             UDP_PROTOCOL,
-            ip_from_u8(192, 168, 31, 1),   
-            ip_from_u8(192, 168, 31, 1),
+            LOCAL_IP,   
+            DEST_IP,
             [0;40],
         );
 
         buffer.extend(u8_from_u16(&(hdr.into_u16_array())));
         buffer.extend(data);
-
-        let mut sendqueue=send_queue.lock().unwrap();
-        sendqueue.add_data(&buffer);
-
+        
+        loop{
+            let dest_mac=shared_arp_cache_table.lock().unwrap().find_mac_from_ip(DEST_IP);
+            if dest_mac.is_some(){
+                let mut sendqueue=shared_ethernet_v2_queue.lock().unwrap();
+                sendqueue.add_data(dest_mac.unwrap(),0x0800,&buffer);
+                break;
+            }
+            else {
+                yield_now()
+            }
+        }
         return true;
     }
     else{
@@ -219,14 +226,23 @@ pub fn load_ip_data(file_path:&String,send_queue:Arc<Mutex<SendQueue>>) -> bool{
                     (i* DATA_SLICE_LENTH / 8)as u16,//DF=0,MF=0
                     64,
                     UDP_PROTOCOL,
-                    ip_from_u8(192, 168, 31, 1),   
-                    ip_from_u8(192, 168, 31, 1),
+                    LOCAL_IP,   
+                    DEST_IP,
                     [0;40],
                 );
                 buffer.extend(u8_from_u16(&(hdr.into_u16_array())));
                 buffer.extend(data[i*DATA_SLICE_LENTH..data.len()].to_vec());
-                let mut sendqueue=send_queue.lock().unwrap();
-                sendqueue.add_data(&buffer);
+                loop{
+                    let dest_mac=shared_arp_cache_table.lock().unwrap().find_mac_from_ip(DEST_IP);
+                    if dest_mac.is_some(){
+                        let mut sendqueue=shared_ethernet_v2_queue.lock().unwrap();
+                        sendqueue.add_data(dest_mac.unwrap(),0x0800,&buffer);
+                        break;
+                    }
+                    else {
+                        yield_now()
+                    }
+                }
             }
             else{
                 let mut buffer:Vec<u8>=Vec::new();
@@ -239,14 +255,24 @@ pub fn load_ip_data(file_path:&String,send_queue:Arc<Mutex<SendQueue>>) -> bool{
                     1<<13 as u16/*MF*/ | (i* DATA_SLICE_LENTH/8)as u16,//MF=1,DF=0
                     64,
                     UDP_PROTOCOL,
-                    ip_from_u8(192, 168, 31, 1),   
-                    ip_from_u8(192, 168, 31, 1),
+                    LOCAL_IP,   
+                    DEST_IP,
                     [0;40],
                 );
                 buffer.extend(u8_from_u16(&(hdr.into_u16_array())));
                 buffer.extend(data[i*DATA_SLICE_LENTH..(i+1)*DATA_SLICE_LENTH].to_vec());
-                let mut sendqueue=send_queue.lock().unwrap();
-                sendqueue.add_data(&buffer);
+                
+                loop{
+                    let dest_mac=shared_arp_cache_table.lock().unwrap().find_mac_from_ip(DEST_IP);
+                    if dest_mac.is_some(){
+                        let mut sendqueue=shared_ethernet_v2_queue.lock().unwrap();
+                        sendqueue.add_data(dest_mac.unwrap(),0x0800,&buffer);
+                        break;
+                    }
+                    else {
+                        yield_now();
+                    }
+                }
             }
         }//end for
         return true;
@@ -254,7 +280,7 @@ pub fn load_ip_data(file_path:&String,send_queue:Arc<Mutex<SendQueue>>) -> bool{
 }
 
 
-pub fn send(shared_send_queue:Arc<Mutex<SendQueue>>) {
+pub fn send(shared_arp_cache_table:Arc<Mutex<ArpCacheTable>>,shared_ethernet_v2_send_queue:Arc<Mutex<Eth2SendQueue>>) {
     let file_path=String::from("data.txt");
-    load_ip_data(&file_path,shared_send_queue);
+    load_ip_data(&file_path,shared_arp_cache_table,shared_ethernet_v2_send_queue);
 }
