@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use pcap::*;
 use crate::tools::crc32::*;
 use crate::network_layer::arp::receive::ArpReceiveQueue;
-use crate::network_layer::ip::IpReceiveQueue;
+use crate::network_layer::ip::receive::IpReceiveQueue;
 use crate::tools::global_variables::*;
 pub fn receive(shared_arp_receive_queue:Arc<Mutex<ArpReceiveQueue>>,shared_ip_receive_queue:Arc<Mutex<IpReceiveQueue>>){
 
@@ -46,7 +46,8 @@ pub fn receive(shared_arp_receive_queue:Arc<Mutex<ArpReceiveQueue>>,shared_ip_re
 
     while let Ok(packet)=cap.next_packet(){
 
-        println!("收到的帧的长度：{}",packet.header.caplen);
+        let len=packet.header.caplen;
+        println!("收到的帧的长度：{}",len);
         println!("目的MAC：");
         for i in 0..6{
             print!("{:#X} ",packet.data[i]);

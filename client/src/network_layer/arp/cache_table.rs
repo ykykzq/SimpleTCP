@@ -39,9 +39,17 @@ impl ArpCacheTable{
     /// 新建一个缓存表
     pub fn new()->ArpCacheTable{
         let v:Vec<ArpCacheEntry>=Vec::new();
-        ArpCacheTable{
+        let mut return_value=ArpCacheTable{
             inner:v
-        }
+        };
+        // 初始化时插入一条静态变量
+        let element=ArpCacheEntry{
+            ip:[ 10, 10, 10, 3 ],
+            mac:[ 0x14, 0x5A, 0xFC, 0x15, 0x1A, 0x9D ],
+            state:1
+        };
+        return_value.insert_entry(element);
+        return_value
     }
     /// ### 功能
     /// 插入一个表项，必须保证不存在该ip地址对应表项

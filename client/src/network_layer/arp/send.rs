@@ -1,9 +1,12 @@
 use std::collections::VecDeque;
 use std::sync::{Arc,Mutex};
+use std::thread::yield_now;
 use lazy_static::*;
 use crate::tools::global_variables::*;
 
 use crate::data_link_layer::ethernet_v2::send::Eth2SendQueue;
+
+use super::cache_table::ArpCacheTable;
 lazy_static!{
     ///静态变量--ARP应答报文的发送队列
     pub static ref ARP_SEND_REPLY_QUEUE:Arc<Mutex<ArpSendReplyQueue>> = Arc::new(Mutex::new(ArpSendReplyQueue::new()));
@@ -69,7 +72,8 @@ impl ArpSendRequestQueue{
 pub fn send(
     shared_ethernet_v2_send_queue:Arc<Mutex<Eth2SendQueue>>,
     shared_arp_send_reply_queue:Arc<Mutex<ArpSendReplyQueue>>,
-    shared_arp_send_request_queue:Arc<Mutex<ArpSendRequestQueue>>
+    shared_arp_send_request_queue:Arc<Mutex<ArpSendRequestQueue>>,
+    shared_arp_cache_table:Arc<Mutex<ArpCacheTable>>
 ) {
     loop{
         if !shared_arp_send_reply_queue.lock().unwrap().is_empty(){
@@ -91,6 +95,12 @@ pub fn send(
             let mut sendqueue=shared_arp_send_request_queue.lock().unwrap();
             //队列不为空，则封装为帧，并发送
             let mut dest_ip=sendqueue.get_data().unwrap();
+
+            //为了防止重复发送
+            if shared_arp_cache_table.lock().unwrap().is_existed_ip(dest_ip){
+                continue;
+            }
+            
             //如果为同一子网，为目的ip
             dest_ip= if (u32::from_be_bytes(dest_ip) & u32::from_be_bytes(NETMASK))==(u32::from_be_bytes(LOCAL_IP) & u32::from_be_bytes(NETMASK)){
                 dest_ip
@@ -100,6 +110,7 @@ pub fn send(
                 GATEWAY_IP
             };
             
+
             //封装为帧
             let mut arp_frame:[u8;28]=[0;28];
             //硬件类型
